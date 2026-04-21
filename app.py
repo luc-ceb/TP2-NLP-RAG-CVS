@@ -30,7 +30,7 @@ st.set_page_config(
 )
 
 st.title("📄 RAG CV Chatbot")
-st.caption("TP1 — Retrieval-Augmented Generation sobre CVs | CEIA-FIUBA")
+st.caption("TP2 — Retrieval-Augmented Generation sobre CVs | CEIA-FIUBA")
 
 
 # ---------------------------------------------------------------------------

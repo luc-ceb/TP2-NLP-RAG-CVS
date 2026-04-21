@@ -1,10 +1,11 @@
-# TP1 — RAG sobre CVs
+# TP2 — RAG sobre CVs
 
 Chatbot basado en **Retrieval-Augmented Generation** sobre un corpus de currículums en PDF.
 
 **Stack:** Pinecone (vector store) · Groq/Llama 3.1 (LLM) · HuggingFace MiniLM (embeddings) · LangChain (orquestación) · Streamlit (UI)
 
 CEIA — FIUBA.
+Autor: Ing. Luciano Ceballos
 
 ## Arquitectura
 
@@ -40,9 +41,9 @@ CEIA — FIUBA.
 ```
 rag-cvs/
 ├── data/
-│   └── cvs/                  # poné acá tus PDFs
+│   └── cvs/                  # cargar aqui los documentos en formato PDFs
 ├── notebooks/
-│   └── tp1_rag_cvs.ipynb     # notebook principal (desarrollo + evaluación)
+│   └── tp2_rag_cvs.ipynb     # notebook principal (desarrollo + evaluación)
 ├── src/
 │   ├── __init__.py
 │   ├── config.py             # variables de entorno y parámetros
@@ -69,28 +70,27 @@ pip install -r requirements.txt
 
 # 3. API keys
 cp .env.example .env
-# editá .env y poné:
-#   GROQ_API_KEY      (https://console.groq.com)
-#   PINECONE_API_KEY  (https://app.pinecone.io)
+#   GROQ_API_KEY      
+#   PINECONE_API_KEY  
 ```
 
 ## Uso
 
-### 1. Cargá tus CVs
+### 1. Carga CVs
 
-Copiá los PDFs a `data/cvs/`:
+Copia los PDFs a `data/cvs/`:
 
 ```
 data/cvs/
-├── cv_ana_garcia.pdf
-├── cv_juan_perez.pdf
-└── cv_maria_lopez.pdf
+├── cv1.pdf
+├── cv2.pdf
+└── cv3.pdf
 ```
 
 ### 2. Ingesta a Pinecone
 
 ```bash
-# Chunking clásico por caracteres
+# Chunking clasico por caracteres
 python -m src.ingestion --force
 
 # Chunking semántico (mismo modelo de embeddings que el retriever)
@@ -105,7 +105,7 @@ El flag `--force` borra los vectores previos del namespace para evitar duplicado
 ### 3. Notebook (desarrollo + evaluación)
 
 ```bash
-jupyter notebook notebooks/tp1_rag_cvs.ipynb
+jupyter notebook notebooks/tp2_rag_cvs.ipynb
 ```
 
 El notebook:
@@ -115,9 +115,6 @@ El notebook:
 4. Prueba el pipeline end-to-end.
 5. Valida conversación con follow-ups (history-aware).
 6. **Evalúa con métricas** (precision@k, recall@k, MRR) + comparación RAG vs no-RAG.
-7. Hace un **sweep de hiperparámetros**.
-
-> ⚠️ En la sección 6.1 actualizá el `eval_set` con queries sobre tus CVs reales y sus ground truth sources.
 
 ### 4. App Streamlit
 
@@ -163,16 +160,8 @@ Para medirlas se arma un `eval_set` manual con queries y sus *ground truth sourc
 ## Decisiones de diseño y tradeoffs
 
 - **Embeddings locales** vs API: `paraphrase-multilingual-MiniLM-L12-v2` corre gratis y sirve para español. Si el corpus crece a miles de CVs conviene probar `BAAI/bge-m3` o embeddings de OpenAI.
-- **Pinecone** vs Chroma: Pinecone serverless es managed, persistente y escalable sin infra; Chroma es más simple para local. Acá elegimos Pinecone por alineación con el enunciado/referencia.
+- **Pinecone** vs Chroma: Pinecone serverless es managed, persistente y escalable sin infra; Chroma es más simple para local. Acá elegimos Pinecone por alineación con el enunciado/contenido visto en clases.
 - **Chunk 500 / overlap 50**: secciones de CV son cortas y densas. Chunks grandes diluyen la señal; chunks chicos fragmentan contexto. 500/50 es un punto razonable en la literatura.
 - **Llama 3.1 8B via Groq**: tier gratuito, latencia < 1s. Para calidad máxima conviene `llama-3.3-70b-versatile`.
 - **System prompt estricto**: obliga a citar fuentes entre corchetes `[filename.pdf]` y a rehusarse si la info no está en el contexto, mitigando alucinaciones.
 - **History-aware retriever**: el retriever naive falla en follow-ups ("¿y dónde estudió?"). La reformulación vía LLM antes del retrieve resuelve esto.
-
-## Mejoras futuras
-
-- Hybrid search (BM25 + embeddings) para captar nombres propios y siglas técnicas.
-- Reranker con cross-encoder para refinar el top-k.
-- Métricas automatizadas tipo RAGAS (*faithfulness*, *answer_relevancy*).
-- Query expansion / HyDE para consultas ambiguas.
-- Filtros por metadata en Pinecone (rol, región) para búsquedas acotadas.
