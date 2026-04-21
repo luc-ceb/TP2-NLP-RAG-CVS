@@ -1,64 +1,73 @@
-# TP2 — RAG sobre CVs
+# TP3 — Sistema Multi-Agente RAG sobre CVs
 
-Chatbot basado en **Retrieval-Augmented Generation** sobre un corpus de currículums en PDF.
+Chatbot basado en **Retrieval-Augmented Generation** con un **agente por candidato**,
+orquestado mediante **LangGraph**. Cada agente tiene su propio namespace en Pinecone
+y su propio prompt especializado. Partiendo del TP2 (RAG simple), se agrega la capa
+multi-agente siguiendo el patrón del repo de referencia `RodrigoGoni/RAG-CVs@feature/multi-agent`.
 
-**Stack:** Pinecone (vector store) · Groq/Llama 3.1 (LLM) · HuggingFace MiniLM (embeddings) · LangChain (orquestación) · Streamlit (UI)
+**Stack:** Pinecone (vector store, un namespace por agente) · Groq/Llama 3.1 (LLM) ·
+HuggingFace MiniLM multilingüe (embeddings) · **LangGraph** (orquestación) ·
+LangChain (RAG chain) · Streamlit (UI).
 
-CEIA — FIUBA.
-Autor: Ing. Luciano Ceballos
+CEIA — FIUBA · TP3 sobre la clase 6.
 
-## Arquitectura
+---
+
+## Diagrama de flujo
 
 ```
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────┐
-│  data/cvs/   │ → │ PyPDFLoader  │ → │  Splitter    │ → │  MiniLM  │
-│    *.pdf     │   │ + limpieza   │   │ (500/50 ó    │   │ 384 dim  │
-│              │   │              │   │  semántico)  │   │          │
-└──────────────┘   └──────────────┘   └──────────────┘   └─────┬────┘
-                                                                 │
-                                                      ┌──────────▼───────┐
-                                                      │    Pinecone      │
-                                                      │  (serverless)    │
-                                                      └──────────┬───────┘
-                                                                 │
-┌──────────┐   ┌──────────────┐   ┌──────────────┐     ┌─────────▼────┐
-│  query   │ → │ (reformular  │ → │  retrieve    │ ←── │   index      │
-│          │   │ si follow-up)│   │   top-k      │     │              │
-└──────────┘   └──────────────┘   └───────┬──────┘     └──────────────┘
-                                          │
-                                 ┌────────▼──────────┐
-                                 │  Groq Llama 3.1   │
-                                 │  + system prompt  │
-                                 └────────┬──────────┘
-                                          │
-                                 ┌────────▼──────────┐
-                                 │ respuesta citada  │
-                                 └───────────────────┘
+__start__
+    │
+    ▼
+route_node          ← re.search() sobre aliases detecta qué candidatos se mencionan
+    │
+    │  conditional_edge   (re.match(r'^single$', route_type) elige la rama)
+    ├─── route_type == "single" ──► rag_single_node ──────────────► __end__
+    │
+    └─── route_type == "multi"  ──► rag_multi_node ──► synthesize_node ──► __end__
 ```
+
+| Nodo | Función |
+|---|---|
+| `route_node` | `re.search()` sobre `config.AGENTS[slug]["aliases"]` para detectar menciones |
+| conditional edge | `re.match(r'^single$', route_type)` elige rama |
+| `rag_single_node` | Invoca 1 `PersonAgent` con su namespace Pinecone propio |
+| `rag_multi_node` | `ThreadPoolExecutor` — N agentes en paralelo, cada uno solo responde sobre sí mismo |
+| `synthesize_node` | LLM combina las respuestas individuales en una comparación unificada |
+
+---
 
 ## Estructura
 
 ```
-rag-cvs/
-├── data/
-│   └── cvs/                  # cargar aqui los documentos en formato PDFs
-├── notebooks/
-│   └── tp2_rag_cvs.ipynb     # notebook principal (desarrollo + evaluación)
-├── src/
-│   ├── __init__.py
-│   ├── config.py             # variables de entorno y parámetros
-│   ├── ingestion.py          # carga → limpieza → chunk → embed → Pinecone
-│   ├── retriever.py          # wrapper sobre el índice de Pinecone
-│   ├── rag_chain.py          # cadena LCEL con history-aware retriever
-│   ├── semantic_chunker.py   # chunker semántico (MiniLM, opcional)
-│   └── evaluation.py         # métricas precision@k, recall@k, MRR
-├── app.py                    # app Streamlit
+tp3-multiagent-rag/
+├── app.py                    # Streamlit con UI por agente
 ├── requirements.txt
 ├── .env.example
-└── README.md
+├── README.md
+├── data/
+│   └── cvs/                  # cv1.pdf, cv2.pdf, cv3.pdf, cv4.pdf
+├── notebooks/
+│   └── tp3_demo.ipynb        # (opcional — generá el tuyo para la entrega)
+└── src/
+    ├── __init__.py
+    ├── config.py             # config + AGENTS dict (editá acá los candidatos)
+    ├── ingestion.py          # ingesta por agente --agent {slug|all}
+    ├── retriever.py          # retriever scopeado a un namespace
+    ├── rag_chain.py          # shim de compatibilidad (reexporta run/preload)
+    ├── semantic_chunker.py   # SemanticChunker con MiniLM (opcional)
+    ├── evaluation.py         # métricas: routing_accuracy + precision/recall/MRR
+    └── agents/
+        ├── __init__.py
+        ├── registry.py       # helpers sobre config.AGENTS
+        ├── person_agent.py   # PersonAgent: retriever + prompt + chain por persona
+        ├── graph.py          # StateGraph compilado (route / single / multi / synth)
+        └── orchestrator.py   # API pública: run() y preload_agents()
 ```
 
-## Instalación
+---
+
+## Setup
 
 ```bash
 # 1. Virtualenv
@@ -70,98 +79,180 @@ pip install -r requirements.txt
 
 # 3. API keys
 cp .env.example .env
-#   GROQ_API_KEY      
-#   PINECONE_API_KEY  
+# editá .env con tus credenciales de Groq y Pinecone
 ```
+
+---
+
+## Configuración de agentes
+
+Editá `src/config.py` para definir a los candidatos:
+
+```python
+AGENTS: dict = {
+    "cv1": {
+        "display_name": "Ana García",                 # ajustalo al nombre real del CV
+        "pdf": "cv1.pdf",
+        "aliases": [r"\bana\b", r"\bana\s*garc[ií]a\b", r"\bcv\s*1\b"],
+    },
+    "cv2": { ... },
+    ...
+}
+DEFAULT_AGENT: str = "cv1"
+```
+
+Los `aliases` son **regex** que se evalúan con `re.search(..., re.IGNORECASE)` sobre
+la query. Agregá todas las formas en que el usuario podría mencionar a la persona:
+nombre, apellido, diminutivos, iniciales, número de CV, etc.
+
+---
 
 ## Uso
 
-### 1. Carga CVs
-
-Copia los PDFs a `data/cvs/`:
+### 1. Copiar los CVs
 
 ```
-data/cvs/
-├── cv1.pdf
-├── cv2.pdf
-└── cv3.pdf
+data/cvs/cv1.pdf
+data/cvs/cv2.pdf
+data/cvs/cv3.pdf
+data/cvs/cv4.pdf
 ```
 
-### 2. Ingesta a Pinecone
+### 2. Ingestar cada CV en su propio namespace
 
 ```bash
-# Chunking clasico por caracteres
-python -m src.ingestion --force
+# Todos de una
+python -m src.ingestion --agent all --force
 
-# Chunking semántico (mismo modelo de embeddings que el retriever)
-python -m src.ingestion --force --use-semantic
+# O uno por uno
+python -m src.ingestion --agent cv1 --force
+python -m src.ingestion --agent cv2 --force
 
-# Directorio custom
-python -m src.ingestion --cvs-dir /otra/ruta --force
+# Chunking semántico (opcional)
+python -m src.ingestion --agent all --force --use-semantic
 ```
 
-El flag `--force` borra los vectores previos del namespace para evitar duplicados en re-ingestas.
+Cada agente queda en el namespace `cv_{slug}` (ej. `cv_cv1`). El flag `--force`
+borra los vectores previos del namespace antes de reindexar.
 
-### 3. Notebook (desarrollo + evaluación)
-
-```bash
-jupyter notebook notebooks/tp2_rag_cvs.ipynb
-```
-
-El notebook:
-1. Arma y explica la arquitectura.
-2. Ingresa los CVs a Pinecone.
-3. Inspecciona manualmente el retriever.
-4. Prueba el pipeline end-to-end.
-5. Valida conversación con follow-ups (history-aware).
-6. **Evalúa con métricas** (precision@k, recall@k, MRR) + comparación RAG vs no-RAG.
-
-### 4. App Streamlit
+### 3. Levantar la app
 
 ```bash
 streamlit run app.py
 ```
 
-Permite:
-- Configurar top-k y tipo de búsqueda (similarity / MMR) en vivo.
-- Chat conversacional con follow-ups.
-- Ver los chunks recuperados con sus fuentes y páginas.
+### 4. Ejemplos de uso
+
+| Pregunta | Comportamiento |
+|---|---|
+| *¿Qué experiencia tiene Ana?* | `route_node` matchea `cv1` → `rag_single_node` |
+| *¿Y Juan dónde estudió?* | `route_node` matchea `cv2` → `rag_single_node` |
+| *Compará la experiencia de Ana y Juan* | matchea `cv1` y `cv2` → `rag_multi_node` + `synthesize_node` |
+| *¿Qué lenguajes maneja el candidato?* | no matchea nadie → usa `DEFAULT_AGENT` |
+
+---
 
 ## Uso programático
 
 ```python
-from src.ingestion import ingest
-from src.rag_chain import build_chain, invoke
+from src.agents.orchestrator import run, preload_agents
+from langchain_core.messages import HumanMessage, AIMessage
 
-# Ingesta (una sola vez, o con cambios)
-ingest(cvs_dir="data/cvs", force=True)
+preload_agents()
 
-# Construir la cadena
-chain, retriever, llm = build_chain()
+# Query simple
+results = run("¿Qué experiencia tiene Ana?")
+for r in results:
+    print(r.display_name, "—", r.answer)
 
-# Query
-result = invoke("¿Qué candidatos saben Python?", chain, retriever)
-print(result.answer)
-print([d.metadata['source'] for d in result.source_documents])
+# Query comparativa
+results = run("Compará Python entre Ana y Juan")
+print(results[0].answer)   # ya viene sintetizada
+
+# Con historial
+history = [HumanMessage(content="Háblame de Ana"), AIMessage(content="...")]
+results = run("¿Y dónde trabajó antes?", chat_history=history)
 ```
+
+---
 
 ## Evaluación
 
-El módulo `src/evaluation.py` implementa tres métricas clásicas de information retrieval:
+`src/evaluation.py` expone métricas a nivel **sistema multi-agente**:
 
-| Métrica | Fórmula | Qué mide |
-|---------|---------|----------|
-| **Precision@k** | # relevantes en top-k / k | Señal / ruido en los chunks recuperados |
-| **Recall@k** | # relevantes en top-k / # relevantes totales | Cobertura de la recuperación |
-| **MRR** | promedio de 1/(rango del 1er relevante) | Qué tan arriba aparece la mejor respuesta |
+| Métrica | Qué mide |
+|---|---|
+| `routing_accuracy` | El `route_node` selecciona el set de agentes correcto |
+| `precision@k` | De los slugs recuperados, fracción que es relevante |
+| `recall@k` | De los slugs relevantes, fracción recuperada |
+| `MRR` | Posición del primer slug relevante en el ranking |
 
-Para medirlas se arma un `eval_set` manual con queries y sus *ground truth sources* (qué archivos contienen la respuesta). Ver sección 6 del notebook.
+```python
+from src.evaluation import EvalQuery, evaluate_all, summary_metrics
 
-## Decisiones de diseño y tradeoffs
+eval_set = [
+    EvalQuery(
+        question="¿Qué experiencia tiene Ana con Docker?",
+        relevant_slugs=["cv1"],
+    ),
+    EvalQuery(
+        question="Compará Ana y Juan en cuanto a lenguajes",
+        relevant_slugs=["cv1", "cv2"],
+    ),
+]
+df = evaluate_all(eval_set, k=4)
+print(summary_metrics(df, k=4))
+```
 
-- **Embeddings locales** vs API: `paraphrase-multilingual-MiniLM-L12-v2` corre gratis y sirve para español. Si el corpus crece a miles de CVs conviene probar `BAAI/bge-m3` o embeddings de OpenAI.
-- **Pinecone** vs Chroma: Pinecone serverless es managed, persistente y escalable sin infra; Chroma es más simple para local. Acá elegimos Pinecone por alineación con el enunciado/contenido visto en clases.
-- **Chunk 500 / overlap 50**: secciones de CV son cortas y densas. Chunks grandes diluyen la señal; chunks chicos fragmentan contexto. 500/50 es un punto razonable en la literatura.
-- **Llama 3.1 8B via Groq**: tier gratuito, latencia < 1s. Para calidad máxima conviene `llama-3.3-70b-versatile`.
-- **System prompt estricto**: obliga a citar fuentes entre corchetes `[filename.pdf]` y a rehusarse si la info no está en el contexto, mitigando alucinaciones.
-- **History-aware retriever**: el retriever naive falla en follow-ups ("¿y dónde estudió?"). La reformulación vía LLM antes del retrieve resuelve esto.
+---
+
+## Decisiones de diseño
+
+- **Pinecone + namespaces vs colecciones Qdrant.** El repo de referencia usa Qdrant
+  local con una colección por agente. Acá mantengo Pinecone del TP2 y uso un
+  *namespace* por agente (`cv_{slug}`) dentro del mismo índice. Es idéntico
+  lógicamente y evita tener que levantar infra local.
+- **Groq/Llama 3.1 vs vLLM/Qwen2.5-32B.** Groq está en el free tier y tiene
+  baja latencia sin GPU. El repo de referencia va por vLLM+Qwen por privacidad /
+  offline; para el TP no agrega valor y complica el setup.
+- **Routing por regex, no por LLM.** Siguiendo el diagrama del enunciado. Es
+  rápido, determinístico y suficiente para nombres de personas. Si hace falta
+  router por LLM para casos ambiguos, se puede sumar una capa 2 (hay un ejemplo
+  en `router.py` del repo de referencia, lo omito acá para mantener el flujo
+  fiel al diagrama).
+- **PersonAgent con prompt defensivo.** Cada agente tiene instrucción explícita
+  de hablar SOLO de su persona aunque la query mencione a otros. La comparación
+  la hace `synthesize_node`, no los agentes.
+- **Síntesis sobre respuestas, no sobre chunks.** El `synthesize_node` recibe
+  lo que cada agente ya dedujo, no los chunks crudos. Esto elimina el riesgo
+  de que el LLM mezcle contextos y atribuya mal.
+- **ThreadPoolExecutor.** Paralelización simple de las llamadas a Groq. Si se
+  hiciera con 10+ agentes en simultáneo habría que cuidar el rate limit del
+  free tier (429); con 2-4 no es problema.
+
+---
+
+## Extender: agregar un candidato nuevo
+
+1. Copiar el PDF a `data/cvs/cv5.pdf`.
+2. Agregar la entrada en `src/config.py`:
+   ```python
+   "cv5": {
+       "display_name": "María López",
+       "pdf": "cv5.pdf",
+       "aliases": [r"\bmar[ií]a\b", r"\bl[oó]pez\b", r"\bcv\s*5\b"],
+   },
+   ```
+3. Ingestar: `python -m src.ingestion --agent cv5 --force`.
+
+El router y el grafo lo incorporan automáticamente sin más cambios.
+
+---
+
+## Mejoras futuras
+
+- Router en dos capas (regex → LLM) para manejo de referencias ambiguas.
+- Cross-encoder reranker por agente para mejorar el top-k.
+- Filtros de metadata en Pinecone (rol, skills) para búsquedas acotadas.
+- Agente de síntesis con *tool calling* para producir tablas comparativas
+  estructuradas.

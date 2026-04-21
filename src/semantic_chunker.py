@@ -1,26 +1,19 @@
 """
 semantic_chunker.py
 -------------------
-Chunking consciente del contexto usando el SemanticChunker de LangChain.
+Chunking consciente del contexto usando SemanticChunker de LangChain con los
+mismos embeddings locales (MiniLM multilingüe) que usa el retriever.
 
-A diferencia de RecursiveCharacterTextSplitter, que corta ciegamente por cuenta
-de caracteres, SemanticChunker detecta límites semánticos naturales calculando
-la similitud coseno entre oraciones consecutivas. Se inserta un corte donde la
-similitud cae significativamente — es decir, donde cambia el tópico.
+A diferencia de RecursiveCharacterTextSplitter, que corta por cuenta de
+caracteres, SemanticChunker detecta límites semánticos naturales calculando
+la similitud coseno entre oraciones consecutivas y corta donde la similitud
+cae significativamente (cambio de tópico).
 
-Usa el MISMO modelo de embeddings que el retriever (HuggingFace MiniLM
-multilingüe), lo que tiene dos ventajas:
+Usamos el MISMO modelo de embeddings que el retriever para que el chunking
+sea coherente con el espacio vectorial donde después se busca.
 
-  1. No requiere API keys externas. Corre 100% local.
-  2. Consistencia: los chunks se cortan según el mismo espacio vectorial en el
-     que después se busca. Si MiniLM considera que dos oraciones hablan del
-     mismo tema, quedan en el mismo chunk y el retriever las puede encontrar
-     juntas. Esto reduce la fragmentación de contexto en el retrieval.
-
-Estrategia de breakpoint: 'percentile'
-    Corta en el top N% de caídas de similitud entre oraciones consecutivas.
-    Un threshold de 85 significa: cortar solo en el 15% de transiciones más
-    abruptas. Menor threshold -> más chunks (cortes más finos).
+Estrategia 'percentile': corta en el top N% de caídas de similitud. Un
+threshold de 85 corta solo en el 15% de transiciones más abruptas.
 """
 
 from typing import List
@@ -36,14 +29,7 @@ _BREAKPOINT_THRESHOLD = 85
 
 
 def build_semantic_chunker() -> SemanticChunker:
-    """
-    Construye un SemanticChunker con los mismos embeddings que el retriever.
-
-    Usamos el modelo declarado en config.EMBED_MODEL (por default,
-    paraphrase-multilingual-MiniLM-L12-v2). Es el mismo espacio vectorial
-    que se usa después para buscar, lo cual mantiene coherencia entre
-    chunking y retrieval.
-    """
+    """Construye un SemanticChunker con los embeddings locales."""
     embeddings = HuggingFaceEmbeddings(
         model_name=config.EMBED_MODEL,
         encode_kwargs={"normalize_embeddings": True},
@@ -57,38 +43,29 @@ def build_semantic_chunker() -> SemanticChunker:
 
 def semantic_chunk(pages: List[Document]) -> List[Document]:
     """
-    Divide las páginas de CVs en chunks semánticamente coherentes.
-
-    Procesamos un CV por vez (agrupando por metadata 'source') para preservar
-    la trazabilidad al archivo origen. Mezclar todos los CVs en un único
-    stream de texto rompería el retrieval por candidato.
+    Divide las páginas de UN CV en chunks semánticamente coherentes.
+    Preserva la metadata 'source'/'agent'/'author' del primer documento.
 
     Parameters
     ----------
     pages : list[Document]
-        Páginas ya limpias provenientes de PyPDFLoader.
+        Páginas ya limpias provenientes de PyPDFLoader, todas del mismo CV.
 
     Returns
     -------
     list[Document]
-        Chunks con metadata 'source', 'cv_file' y 'chunking_method'.
     """
+    if not pages:
+        return []
+
     chunker = build_semantic_chunker()
+    full_text = "\n\n".join(p.page_content for p in pages)
+    chunks = chunker.create_documents([full_text])
 
-    # Agrupamos páginas por archivo de origen
-    by_source: dict = {}
-    for page in pages:
-        src = page.metadata.get("source", "unknown")
-        by_source.setdefault(src, []).append(page)
+    # Propagamos la metadata de la primera página a todos los chunks
+    base_meta = dict(pages[0].metadata)
+    for chunk in chunks:
+        chunk.metadata.update(base_meta)
+        chunk.metadata["chunking_method"] = "semantic_minilm"
 
-    all_chunks: List[Document] = []
-    for src, src_pages in by_source.items():
-        full_text = "\n\n".join(p.page_content for p in src_pages)
-        src_chunks = chunker.create_documents([full_text])
-        for chunk in src_chunks:
-            chunk.metadata["source"] = src
-            chunk.metadata["cv_file"] = src
-            chunk.metadata["chunking_method"] = "semantic_minilm"
-        all_chunks.extend(src_chunks)
-
-    return all_chunks
+    return chunks

@@ -1,73 +1,54 @@
 """
 app.py
 ------
-Interfaz Streamlit para el chatbot RAG sobre CVs.
+Interfaz Streamlit para el chatbot multi-agente RAG sobre CVs.
 
-El retriever y el chain se inicializan una sola vez por sesión usando
-st.session_state para no recargar el modelo de embeddings en cada query.
+El orquestador se inicializa una sola vez por sesión y los agentes se
+pre-construyen al arrancar para evitar latencia en la primera query.
 
 Run:
     streamlit run app.py
 """
 
-from pathlib import Path
-
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src import config
-from src.rag_chain import build_chain, invoke
+from src.agents.orchestrator import preload_agents, run
+from src.agents.registry import get_all_slugs, get_display_name
 
 
 # ---------------------------------------------------------------------------
-# Config de la página
+# Página
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="RAG CV Chatbot",
+    page_title="RAG CV Chatbot — Multi-Agente",
     page_icon="📄",
     layout="wide",
 )
 
-st.title("📄 RAG CV Chatbot")
-st.caption("TP2 — Retrieval-Augmented Generation sobre CVs | CEIA-FIUBA")
+st.title("📄 RAG CV Chatbot — Multi-Agente")
+st.caption(
+    "TP3 — Un agente por candidato · LangGraph + Pinecone + Groq/Llama 3.1 · CEIA-FIUBA"
+)
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: configuración e información
+# Sidebar: info de agentes registrados
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
+    st.header("🤖 Agentes registrados")
+    for slug in get_all_slugs():
+        st.markdown(f"• **{get_display_name(slug)}**  (`{slug}`)")
+    st.divider()
+
     st.header("⚙️ Configuración")
-
-    st.subheader("Retrieval")
-    top_k = st.slider("Top-k chunks", 1, 10, config.TOP_K)
-    search_type = st.selectbox(
-        "Tipo de búsqueda",
-        options=["similarity", "mmr"],
-        index=0,
-        help="MMR prioriza diversidad entre los chunks recuperados.",
-    )
-
-    st.subheader("LLM")
-    st.text(f"Modelo: {config.GROQ_MODEL}")
-    st.text(f"Temperature: {config.GROQ_TEMPERATURE}")
-
-    st.divider()
-
-    st.subheader("📂 Corpus")
-    cvs_dir = Path(config.CVS_DIR)
-    n_pdfs = len(list(cvs_dir.glob("*.pdf"))) if cvs_dir.exists() else 0
-    st.metric("PDFs en corpus", n_pdfs)
+    st.text(f"LLM: {config.GROQ_MODEL}")
     st.text(f"Index: {config.PINECONE_INDEX_NAME}")
-    st.text(f"Namespace: {config.PINECONE_NAMESPACE}")
-
+    st.text(f"Top-K: {config.TOP_K}")
     st.divider()
-
-    if st.button("🔄 Reinicializar cadena", use_container_width=True):
-        for k in ("chain", "retriever", "llm", "_chain_config"):
-            st.session_state.pop(k, None)
-        st.rerun()
 
     if st.button("🗑️ Limpiar chat", use_container_width=True):
         st.session_state.messages = []
@@ -75,21 +56,20 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Inicialización del chain (una sola vez o cuando cambia la config)
+# Pre-carga de agentes (una vez por sesión)
 # ---------------------------------------------------------------------------
 
-current_cfg = (top_k, search_type)
-if "chain" not in st.session_state or st.session_state.get("_chain_config") != current_cfg:
-    with st.spinner("Conectando a Pinecone y cargando modelo de embeddings..."):
+if "agents_ready" not in st.session_state:
+    with st.spinner("Cargando agentes y conectando a Pinecone..."):
         try:
-            chain, retriever, llm = build_chain(top_k=top_k, search_type=search_type)
-            st.session_state.chain = chain
-            st.session_state.retriever = retriever
-            st.session_state.llm = llm
-            st.session_state._chain_config = current_cfg
+            preload_agents()
+            st.session_state.agents_ready = True
         except Exception as exc:
-            st.error(f"Error al inicializar el sistema: {exc}")
-            st.info("Verificá que corriste la ingesta: `python -m src.ingestion --force`")
+            st.error(f"Error al inicializar los agentes: {exc}")
+            st.info(
+                "Verificá que corriste la ingesta: "
+                "`python -m src.ingestion --agent all --force`"
+            )
             st.stop()
 
 
@@ -101,32 +81,41 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 
-def _render_sources(docs):
-    """Renderiza los chunks recuperados en un expander."""
+def _render_sources(docs, display_name: str):
     if not docs:
         return
-    with st.expander(f"🔎 Ver {len(docs)} chunks recuperados"):
+    with st.expander(f"🔎 Contexto — {display_name}  ({len(docs)} chunks)"):
         for i, doc in enumerate(docs, 1):
             source = doc.metadata.get("source", "?")
             page = doc.metadata.get("page", "?")
-            st.markdown(f"**Fragmento {i}** — `{source}` (pág. {page})")
+            author = doc.metadata.get("author", "")
+            label = f"**Fragmento {i}** — `{source}` (pág. {page})"
+            if author:
+                label += f"  *de {author}*"
+            st.markdown(label)
             st.text(doc.page_content)
             st.divider()
 
 
-# Render histórico
+# Render del histórico
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
         if msg["role"] == "assistant":
-            _render_sources(msg.get("sources", []))
+            for resp in msg["agent_responses"]:
+                is_synthesis = resp.get("agent_slug") == "synthesis"
+                if len(msg["agent_responses"]) > 1 or is_synthesis:
+                    st.markdown(f"### {resp['display_name']}")
+                st.markdown(resp["answer"])
+                _render_sources(resp.get("sources", []), resp["display_name"])
+        else:
+            st.markdown(msg["content"])
 
 
 # ---------------------------------------------------------------------------
 # Nueva pregunta
 # ---------------------------------------------------------------------------
 
-question = st.chat_input("Preguntá algo sobre los candidatos...")
+question = st.chat_input("Preguntá sobre alguno de los candidatos...")
 
 if question:
     # Mensaje del usuario
@@ -134,37 +123,51 @@ if question:
         st.markdown(question)
     st.session_state.messages.append({"role": "user", "content": question})
 
-    # Respuesta del asistente
-    with st.chat_message("assistant"):
-        with st.spinner("Buscando en los CVs y generando respuesta..."):
-            try:
-                # Armamos el chat_history en formato LangChain
-                chat_history = []
-                for msg in st.session_state.messages[:-1]:  # excluye la pregunta actual
-                    if msg["role"] == "user":
-                        chat_history.append(HumanMessage(content=msg["content"]))
-                    elif msg["role"] == "assistant":
-                        chat_history.append(AIMessage(content=msg["content"]))
+    # Armamos el chat_history en formato LangChain (excluyendo la pregunta actual)
+    chat_history = []
+    for msg in st.session_state.messages[:-1]:
+        if msg["role"] == "user":
+            chat_history.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant":
+            combined = "\n\n".join(
+                f"[{r['display_name']}]: {r['answer']}" for r in msg["agent_responses"]
+            )
+            chat_history.append(AIMessage(content=combined))
 
-                result = invoke(
-                    question=question,
-                    chain=st.session_state.chain,
-                    retriever=st.session_state.retriever,
-                    chat_history=chat_history,
-                )
-                st.markdown(result.answer)
-                _render_sources(result.source_documents)
+    # Invocamos el grafo
+    with st.chat_message("assistant"):
+        with st.spinner("Ruteando, recuperando contexto y generando respuesta..."):
+            try:
+                results = run(question=question, chat_history=chat_history)
+
+                agent_responses = []
+                for result in results:
+                    is_synthesis = result.agent_slug == "synthesis"
+                    if len(results) > 1 or is_synthesis:
+                        st.markdown(f"### {result.display_name}")
+                    st.markdown(result.answer)
+                    _render_sources(result.source_documents, result.display_name)
+                    agent_responses.append({
+                        "agent_slug": result.agent_slug,
+                        "display_name": result.display_name,
+                        "answer": result.answer,
+                        "sources": result.source_documents,
+                    })
 
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": result.answer,
-                    "sources": result.source_documents,
+                    "agent_responses": agent_responses,
                 })
+
             except Exception as exc:
                 error_msg = f"Error al generar la respuesta: {exc}"
                 st.error(error_msg)
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": error_msg,
-                    "sources": [],
+                    "agent_responses": [{
+                        "agent_slug": "error",
+                        "display_name": "Sistema",
+                        "answer": error_msg,
+                        "sources": [],
+                    }],
                 })

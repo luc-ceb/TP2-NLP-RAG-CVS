@@ -1,26 +1,23 @@
 """
 ingestion.py
 ------------
-Ingesta de múltiples CVs en formato PDF a un índice de Pinecone.
+Script de ingesta multi-agente. Cada CV se indexa en SU PROPIO namespace
+de Pinecone ("cv_{slug}"), de forma que el retrieval esté aislado por persona.
 
-Pipeline (default):
-    data/cvs/*.pdf
-        -> PyPDFLoader                     (extract text pages por archivo)
-        -> clean_spaced_text()             (fix PDF letter-spacing artifact)
-        -> RecursiveCharacterTextSplitter  (split por carácter)
-        -> HuggingFaceEmbeddings           (embed local)
-        -> PineconeVectorStore             (upsert)
-
-Pipeline (--use-semantic):
-    data/cvs/*.pdf
+Pipeline por agente:
+    data/cvs/{pdf}
         -> PyPDFLoader
         -> clean_spaced_text()
-        -> SemanticChunker + HuggingFace MiniLM  (split por tópico)
-        -> HuggingFaceEmbeddings
-        -> PineconeVectorStore
+        -> RecursiveCharacterTextSplitter  (default)
+           o SemanticChunker (--use-semantic)
+        -> HuggingFaceEmbeddings (384 dims)
+        -> PineconeVectorStore  (namespace="cv_{slug}")
 
 Uso:
-    python -m src.ingestion [--cvs-dir PATH] [--force] [--use-semantic]
+    python -m src.ingestion --agent cv1
+    python -m src.ingestion --agent all
+    python -m src.ingestion --agent cv1 --force
+    python -m src.ingestion --agent all --use-semantic
 """
 
 import argparse
@@ -38,6 +35,7 @@ from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
 
 from src import config
+from src.agents.registry import get_display_name, get_namespace, get_pdf_filename
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,45 +45,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Mapa de acentos sueltos (combining marks + ASCII) a letras con tilde
+# ---------------------------------------------------------------------------
+# Limpieza de artefactos de extracción PDF (idéntica a TP2)
+# ---------------------------------------------------------------------------
+
 _ACCENT_FIX_MAP = {
     "a´": "á", "e´": "é", "i´": "í", "o´": "ó", "u´": "ú",
     "A´": "Á", "E´": "É", "I´": "Í", "O´": "Ó", "U´": "Ú",
     "n~": "ñ", "N~": "Ñ",
-    "a`": "à", "e`": "è", "i`": "ì", "o`": "ò", "u`": "ù",
-    "a¨": "ä", "e¨": "ë", "i¨": "ï", "o¨": "ö", "u¨": "ü",
-    # Versión con espacio: "Dom´ ınguez" -> "Domínguez"
-    # La í/ı sola después del acento se debe al dotless-i del PDF
 }
 
 
 def _fix_accents(text: str) -> str:
-    """
-    Corrige acentos extraídos como carácter separado.
-    Casos cubiertos:
-      'Dom´ınguez' -> 'Domínguez'  (acento + i sin punto)
-      'Dom´ ınguez' -> 'Domínguez' (acento + espacio + i sin punto)
-      'Tel´efono' -> 'Teléfono'
-    """
-    # Paso 1: eliminar espacios entre acento y letra siguiente
-    # 'Dom´ ınguez' -> 'Dom´ınguez'
     text = re.sub(r"([´`¨~])\s+([aeiouAEIOUn])", r"\1\2", text)
-    # Paso 2: convertir 'ı' (dotless i, común en PDFs) + acento previo a 'í'
     text = re.sub(r"´ı", "í", text)
     text = re.sub(r"´I", "Í", text)
-    # Paso 3: mapear las combinaciones letra+acento a la letra con tilde
     for wrong, right in _ACCENT_FIX_MAP.items():
         text = text.replace(wrong, right)
-    # Paso 4: acento+letra en orden PDF (´a -> á)
-    text = re.sub(r"´([aeiouAEIOU])",
-                  lambda m: {"a":"á","e":"é","i":"í","o":"ó","u":"ú",
-                             "A":"Á","E":"É","I":"Í","O":"Ó","U":"Ú"}[m.group(1)],
-                  text)
+    text = re.sub(
+        r"´([aeiouAEIOU])",
+        lambda m: {"a": "á", "e": "é", "i": "í", "o": "ó", "u": "ú",
+                   "A": "Á", "E": "É", "I": "Í", "O": "Ó", "U": "Ú"}[m.group(1)],
+        text,
+    )
     return text
 
 
 def _fix_spaced_line(line: str) -> str:
-    """Corrige líneas donde la extracción del PDF separó cada carácter con un espacio."""
     stripped = line.strip()
     if not stripped:
         return line
@@ -93,67 +79,26 @@ def _fix_spaced_line(line: str) -> str:
     single = sum(1 for t in tokens if len(t) == 1 and t.isalnum())
     if len(tokens) > 2 and single / len(tokens) >= 0.5:
         cleaned = re.sub(r"(?<=[^\s]) (?=[^\s])", "", line)
-        cleaned = re.sub(r" {2,}", " ", cleaned)
-        return cleaned
+        return re.sub(r" {2,}", " ", cleaned)
     return line
 
 
 def clean_spaced_text(text: str) -> str:
-    """
-    Normaliza artefactos típicos de extracción de PDFs:
-      - Letter-spacing: 's t r u c t u r e' -> 'structure'
-      - Acentos sueltos: 'Dom´ ınguez' -> 'Domínguez'
-    """
-    # Primero fix de espaciado, después fix de acentos
+    """Normaliza artefactos comunes de PyPDF: letter-spacing y acentos sueltos."""
     text = "\n".join(_fix_spaced_line(ln) for ln in text.split("\n"))
     text = _fix_accents(text)
     return text
 
+
 def _clean_documents(docs: List[Document]) -> List[Document]:
-    """Aplica clean_spaced_text a todos los documentos in-place."""
     for doc in docs:
         doc.page_content = clean_spaced_text(doc.page_content)
     return docs
 
 
 # ---------------------------------------------------------------------------
-# Carga multi-PDF
+# Pinecone helpers
 # ---------------------------------------------------------------------------
-
-def _load_all_pdfs(cvs_dir: Path) -> List[Document]:
-    """
-    Carga todos los PDFs de la carpeta y normaliza la metadata 'source' al
-    nombre de archivo (sin path absoluto). Esto permite citar fuentes como
-    [cv_juan_perez.pdf] en las respuestas del LLM.
-    """
-    pdf_paths = sorted(cvs_dir.glob("*.pdf"))
-    if not pdf_paths:
-        raise FileNotFoundError(f"No se encontraron PDFs en {cvs_dir}")
-
-    logger.info("Encontrados %d PDFs en %s", len(pdf_paths), cvs_dir)
-    all_docs: List[Document] = []
-    for pdf in pdf_paths:
-        loader = PyPDFLoader(str(pdf))
-        pages = loader.load()
-        # Normalizar source al filename
-        for page in pages:
-            page.metadata["source"] = pdf.name
-            page.metadata["cv_file"] = pdf.name  # alias explícito
-        logger.info("  %s: %d página(s)", pdf.name, len(pages))
-        all_docs.extend(pages)
-
-    logger.info("Total: %d página(s) cargadas.", len(all_docs))
-    return all_docs
-
-
-def _build_embeddings() -> HuggingFaceEmbeddings:
-    """Inicializa el modelo de embeddings local."""
-    logger.info("Cargando modelo de embeddings: %s", config.EMBED_MODEL)
-    return HuggingFaceEmbeddings(
-        model_name=config.EMBED_MODEL,
-        encode_kwargs={"normalize_embeddings": True},
-    )
-
 
 def _ensure_index(pc: Pinecone) -> None:
     """Crea el índice de Pinecone si no existe."""
@@ -175,47 +120,70 @@ def _ensure_index(pc: Pinecone) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Función principal
+# Ingesta por agente
 # ---------------------------------------------------------------------------
 
-def ingest(cvs_dir: str, force: bool = False, use_semantic: bool = False) -> int:
+def ingest(
+    agent_slug: str,
+    force: bool = False,
+    use_semantic: bool = False,
+) -> int:
     """
-    Pipeline completo: load PDFs → clean → chunk → embed → upsert Pinecone.
+    Indexa el CV de UN agente en su namespace propio.
 
     Parameters
     ----------
-    cvs_dir : str
-        Directorio con los PDFs de CVs.
+    agent_slug : str
+        Clave de config.AGENTS (ej. "cv1").
     force : bool
-        Si True, borra los vectores existentes del namespace antes de reindexar.
+        Si True, borra los vectores del namespace antes de reindexar.
     use_semantic : bool
-        Si True, usa SemanticChunker (MiniLM) en lugar de splitting por caracteres.
+        Si True, usa SemanticChunker en lugar de RecursiveCharacterTextSplitter.
 
     Returns
     -------
     int
         Número de chunks indexados.
     """
-    cvs_path = Path(cvs_dir)
-    if not cvs_path.is_dir():
-        raise FileNotFoundError(f"Directorio no encontrado: {cvs_dir}")
+    if agent_slug not in config.AGENTS:
+        raise ValueError(
+            f"Agente desconocido '{agent_slug}'. "
+            f"Disponibles: {list(config.AGENTS.keys())}"
+        )
 
-    # 1. Cargar todos los PDFs
-    pages = _load_all_pdfs(cvs_path)
+    display_name = get_display_name(agent_slug)
+    pdf_filename = get_pdf_filename(agent_slug)
+    pdf_path = config.CVS_DIR / pdf_filename
+    namespace = get_namespace(agent_slug)
 
-    # 2. Limpiar artefactos de extracción
+    if not pdf_path.is_file():
+        raise FileNotFoundError(
+            f"CV no encontrado para {display_name} en: {pdf_path}\n"
+            f"Copiá el PDF en {config.CVS_DIR} con nombre '{pdf_filename}' y reintentá."
+        )
+
+    # 1. Cargar PDF
+    logger.info("[%s] Cargando %s", display_name, pdf_path)
+    loader = PyPDFLoader(str(pdf_path))
+    pages = loader.load()
+    logger.info("[%s] %d página(s) cargadas.", display_name, len(pages))
+
+    # 2. Normalizar metadata + limpieza de texto
+    for page in pages:
+        page.metadata["source"] = pdf_path.name
+        page.metadata["agent"] = agent_slug
+        page.metadata["author"] = display_name
     pages = _clean_documents(pages)
-    logger.info("Limpieza de texto aplicada.")
 
     # 3. Split en chunks
     if use_semantic:
-        logger.info("Estrategia de chunking: SemanticChunker (HuggingFace MiniLM)")
+        logger.info("[%s] Chunking: SemanticChunker (MiniLM).", display_name)
         from src.semantic_chunker import semantic_chunk
         chunks = semantic_chunk(pages)
     else:
         logger.info(
-            "Estrategia de chunking: RecursiveCharacterTextSplitter (size=%d, overlap=%d)",
-            config.CHUNK_SIZE, config.CHUNK_OVERLAP,
+            "[%s] Chunking: Recursive (size=%d, overlap=%d).",
+            display_name, config.CHUNK_SIZE, config.CHUNK_OVERLAP,
         )
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHUNK_SIZE,
@@ -223,66 +191,89 @@ def ingest(cvs_dir: str, force: bool = False, use_semantic: bool = False) -> int
             separators=["\n\n", "\n", ". ", " ", ""],
         )
         chunks = splitter.split_documents(pages)
-    logger.info("Total de chunks generados: %d", len(chunks))
+
+    # Reforzamos metadata en todos los chunks (algunos splitters la pierden)
+    for chunk in chunks:
+        chunk.metadata.setdefault("source", pdf_path.name)
+        chunk.metadata["agent"] = agent_slug
+        chunk.metadata["author"] = display_name
+    logger.info("[%s] %d chunks generados.", display_name, len(chunks))
 
     # 4. Embeddings
-    embeddings = _build_embeddings()
+    logger.info("Cargando modelo de embeddings: %s", config.EMBED_MODEL)
+    embeddings = HuggingFaceEmbeddings(
+        model_name=config.EMBED_MODEL,
+        encode_kwargs={"normalize_embeddings": True},
+    )
 
-    # 5. Crear índice si hace falta
+    # 5. Asegurar que el índice exista
     pc = Pinecone(api_key=config.PINECONE_API_KEY)
     _ensure_index(pc)
 
-    # 6. Limpiar vectores existentes opcionalmente
+    # 6. Limpiar namespace si --force
     if force:
         logger.info(
-            "--force: borrando vectores existentes en '%s' (namespace='%s')...",
-            config.PINECONE_INDEX_NAME, config.PINECONE_NAMESPACE,
+            "[%s] --force: borrando vectores del namespace '%s'...",
+            display_name, namespace,
         )
         try:
             pc.Index(config.PINECONE_INDEX_NAME).delete(
-                delete_all=True, namespace=config.PINECONE_NAMESPACE
+                delete_all=True, namespace=namespace
             )
         except Exception:
-            pass  # namespace aún no existe
-        logger.info("Índice vaciado.")
+            # El namespace puede no existir todavía — está bien
+            pass
 
     # 7. Upsert
-    logger.info("Upserting %d chunks a Pinecone...", len(chunks))
+    logger.info("[%s] Upserting %d chunks a Pinecone (ns='%s')...",
+                display_name, len(chunks), namespace)
     PineconeVectorStore.from_documents(
         documents=chunks,
         embedding=embeddings,
         index_name=config.PINECONE_INDEX_NAME,
         pinecone_api_key=config.PINECONE_API_KEY,
-        namespace=config.PINECONE_NAMESPACE,
+        namespace=namespace,
     )
-    logger.info("Ingesta completa. %d chunks indexados.", len(chunks))
+    logger.info("[%s] Ingesta completa. %d chunks indexados.", display_name, len(chunks))
     return len(chunks)
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Ingesta de CVs en PDF a Pinecone.")
+    parser = argparse.ArgumentParser(description="Ingesta multi-agente de CVs a Pinecone.")
     parser.add_argument(
-        "--cvs-dir",
-        default=str(config.CVS_DIR),
-        help=f"Directorio con PDFs (default: {config.CVS_DIR})",
+        "--agent",
+        required=True,
+        choices=list(config.AGENTS.keys()) + ["all"],
+        help="Slug del agente a indexar, o 'all' para indexar todos.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Borrar vectores existentes antes de indexar (evita duplicados).",
+        help="Borrar el namespace antes de reindexar (evita duplicados).",
     )
     parser.add_argument(
         "--use-semantic",
         action="store_true",
         dest="use_semantic",
-        help="Usar SemanticChunker (HuggingFace MiniLM) en lugar de RecursiveCharacterTextSplitter.",
+        help="Usar SemanticChunker en lugar de RecursiveCharacterTextSplitter.",
     )
     args = parser.parse_args()
 
-    try:
-        total = ingest(args.cvs_dir, force=args.force, use_semantic=args.use_semantic)
-        sys.exit(0)
-    except FileNotFoundError as exc:
-        logger.error(str(exc))
-        logger.error("Colocá tus CVs en data/cvs/ y volvé a correr.")
-        sys.exit(1)
+    targets = list(config.AGENTS.keys()) if args.agent == "all" else [args.agent]
+    failed = False
+    for slug in targets:
+        try:
+            total = ingest(slug, force=args.force, use_semantic=args.use_semantic)
+            print(f"  ✓ {slug}: {total} chunks indexados.")
+        except FileNotFoundError as exc:
+            logger.error(str(exc))
+            failed = True
+        except Exception as exc:
+            logger.error("[%s] Error inesperado: %s", slug, exc)
+            failed = True
+
+    sys.exit(1 if failed else 0)
