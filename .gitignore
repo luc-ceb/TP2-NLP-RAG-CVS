@@ -1,0 +1,40 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.pytest_cache/
+
+# CVs (pueden ser confidenciales)
+# Comentá la siguiente línea si querés versionarlos
+data/cvs/*.pdf
+!data/cvs/cv2.pdf   # excepción para los sintéticos
+!data/cvs/cv3.pdf
+!data/cvs/cv4.pdf
+
+# Venv
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# HuggingFace cache
+.cache/
+
+# IDE (evita subir configs personales de VS Code / PyCharm)
+.vscode/
+.idea/
+
+# Streamlit (puede contener secretos)
+.streamlit/secrets.toml
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+a.out
+*.out
