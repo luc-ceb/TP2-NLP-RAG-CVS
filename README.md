@@ -2,10 +2,22 @@
 
 Chatbot basado en **Retrieval-Augmented Generation** sobre un corpus de currículums en PDF.
 
-**Stack:** Pinecone (vector store) · Groq/Llama 3.1 (LLM) · HuggingFace MiniLM (embeddings) · LangChain (orquestación) · Streamlit (UI)
+**Stack:** 
 
-CEIA — FIUBA.
-Autor: Ing. Luciano Ceballos
+· Pinecone (vector store) 
+
+· Groq/Llama 3.1 (LLM) 
+
+· HuggingFace MiniLM (embeddings) 
+
+· LangChain (orquestación) 
+
+· Streamlit (UI)
+
+### CEIA — FIUBA.
+### Autor: Ing. Luciano Ceballos
+
+----
 
 ## Arquitectura
 
@@ -51,7 +63,7 @@ rag-cvs/
 │   ├── retriever.py          # wrapper sobre el índice de Pinecone
 │   ├── rag_chain.py          # cadena LCEL con history-aware retriever
 │   ├── semantic_chunker.py   # chunker semántico (MiniLM, opcional)
-│   └── evaluation.py         # métricas precision@k, recall@k, MRR
+│   └── evaluation.py         # métricas precisionók, recallak, MRR
 ├── app.py                    # app Streamlit
 ├── requirements.txt
 ├── .env.example
@@ -85,6 +97,7 @@ data/cvs/
 ├── cv1.pdf
 ├── cv2.pdf
 └── cv3.pdf
+└── cv4.pdf
 ```
 
 ### 2. Ingesta a Pinecone

@@ -54,8 +54,7 @@ _ACCENT_FIX_MAP = {
     "n~": "ñ", "N~": "Ñ",
     "a`": "à", "e`": "è", "i`": "ì", "o`": "ò", "u`": "ù",
     "a¨": "ä", "e¨": "ë", "i¨": "ï", "o¨": "ö", "u¨": "ü",
-    # Versión con espacio: "Dom´ ınguez" -> "Domínguez"
-    # La í/ı sola después del acento se debe al dotless-i del PDF
+    
 }
 
 

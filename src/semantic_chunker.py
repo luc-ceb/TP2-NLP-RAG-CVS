@@ -8,7 +8,7 @@ de caracteres, SemanticChunker detecta límites semánticos naturales calculando
 la similitud coseno entre oraciones consecutivas. Se inserta un corte donde la
 similitud cae significativamente — es decir, donde cambia el tópico.
 
-Usa el MISMO modelo de embeddings que el retriever (HuggingFace MiniLM
+Usa el mismo modelo de embeddings que el retriever (HuggingFace MiniLM
 multilingüe), lo que tiene dos ventajas:
 
   1. No requiere API keys externas. Corre 100% local.

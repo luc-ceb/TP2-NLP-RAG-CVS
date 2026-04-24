@@ -1,11 +1,8 @@
 """
 config.py
 ---------
-Centralizes all configuration values for the RAG pipeline.
-Loads environment variables from .env and exposes typed constants.
-
-All tuneable parameters live here. Other modules should never
-construct paths or read os.environ directly.
+Centraliza todos los valores de configuracion para el pipeline del RAG
+Carga todas las variables de entorno desde .env y exporta las constantes typeadas
 """
 
 import os
