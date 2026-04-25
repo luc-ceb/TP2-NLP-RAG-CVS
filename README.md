@@ -8,13 +8,22 @@ multi-agente siguiendo el patrón del repo de referencia.
 **Stack:** 
 
 · Pinecone (vector store, un namespace por agente) 
+
 · Groq/Llama 3.1 (LLM) 
+
 · HuggingFace MiniLM multilingüe (embeddings) 
+
 · **LangGraph (orquestación) 
+
 · LangChain (RAG chain) 
+
 · Streamlit (UI).
 
 CEIA — FIUBA · TP3 sobre la clase 6.
+
+
+### Link al video demo
+- 📹  https://drive.google.com/file/d/1t1EGN4m2_BjE8_bUSy0qaBubdx8uBDVl/view?usp=sharing
 
 ---
 
