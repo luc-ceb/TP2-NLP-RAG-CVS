@@ -17,6 +17,9 @@ Chatbot basado en **Retrieval-Augmented Generation** sobre un corpus de currícu
 ### CEIA — FIUBA.
 ### Autor: Ing. Luciano Ceballos
 
+### Link al video demo: 
+- https://drive.google.com/file/d/171vrDwoET17PCWK3lJQGQ-VLK5bE_w_2/view?usp=sharing
+
 ----
 
 ## Arquitectura
